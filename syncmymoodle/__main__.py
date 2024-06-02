@@ -752,6 +752,7 @@ class SyncMyMoodle:
     def _download_all_files(self, cur_node):
         if len(cur_node.children) == 0:
             if cur_node.url and not cur_node.is_downloaded:
+                logger.info(f"Downloading {cur_node.url} [{cur_node.type}]")
                 if cur_node.type == "Youtube":
                     try:
                         self.scanAndDownloadYouTube(cur_node)
@@ -761,6 +762,12 @@ class SyncMyMoodle:
                         logger.error(
                             "This could be caused by an out of date yt-dlp version. Try upgrading yt-dlp through pip or your package manager."
                         )
+                elif cur_node.type == "RwthVideo":
+                    try:
+                        self.downloadRWTHVideo(cur_node)
+                        cur_node.is_downloaded = True
+                    except Exception:
+                        logger.exception(f"Failed to download the module {cur_node}")
                 elif cur_node.type == "Opencast":
                     try:
                         self.downloadOpenCastVideos(cur_node)
@@ -809,6 +816,7 @@ class SyncMyMoodle:
         downloadpath = self.get_sanitized_node_path(node)
 
         if downloadpath.exists():
+            logger.info(f"Skipping {node.url} as it is already downloaded")
             return True
 
         if len(node.name.split(".")) > 0 and node.name.split(".")[
@@ -918,9 +926,33 @@ class SyncMyMoodle:
         link = node.url
         if path.exists():
             if any(link[-YOUTUBE_ID_LENGTH:] in f.name for f in path.iterdir()):
+                logger.info(f"Skipping {link} as it is already downloaded")
                 return False
         ydl_opts = {
             "outtmpl": "{}/%(title)s-%(id)s.%(ext)s".format(path),
+            "ignoreerrors": True,
+            "nooverwrites": True,
+            "retries": 15,
+            "match_filter": yt_dlp.match_filter_func("!is_live"),
+        }
+        path.mkdir(parents=True, exist_ok=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([link])
+        return True
+
+    def downloadRWTHVideo(self, node: Node):
+        """Download from RWTH-Video"""
+        path = self.get_sanitized_node_path(node.parent)
+        link = node.url
+        # check if folder exists
+        if path.exists():
+            # if the file already exists, we don't need to download it again
+            if any(link.split("/")[-1] in f.name for f in path.iterdir()):
+                logger.info(f"Skipping {link} as it is already downloaded")
+                return False
+        # download the file
+        ydl_opts = {
+            "outtmpl": "{}/%(title)s-{}.%(ext)s".format(path, node.id),
             "ignoreerrors": True,
             "nooverwrites": True,
             "retries": 15,
@@ -936,6 +968,7 @@ class SyncMyMoodle:
         path.mkdir(parents=True, exist_ok=True)
 
         if (path / f"{node.name}.pdf").exists():
+            logger.info(f"Skipping {node.name} as it is already downloaded")
             return True
 
         quiz_res = bs(self.session.get(node.url).text, features="html.parser")
@@ -962,7 +995,7 @@ class SyncMyMoodle:
         return True
 
     def scanForLinks(
-        self, text, parent_node, course_id, module_title=None, single=False
+        self, text: str, parent_node: Node, course_id: int, module_title=None, single=False
     ):
         # A single link is supplied and the contents of it are checked
         if single:
@@ -1029,6 +1062,7 @@ class SyncMyMoodle:
                 )
             ]
             for link in youtube_links:
+                logging.info(f"Found Youtube Video: {link}")
                 parent_node.add_child(
                     f"Youtube: {module_title or link}", link, "Youtube", url=link
                 )
@@ -1039,6 +1073,7 @@ class SyncMyMoodle:
                 "https://engage.streaming.rwth-aachen.de/play/[a-zA-Z0-9-]+", text
             )
             for vid in opencast_links:
+                logging.info(f"Found Opencast Video: {vid}")
                 vid = self.getOpenCastRealURL(course_id, vid)
                 parent_node.add_child(
                     module_title or vid.split("/")[-1],
@@ -1046,6 +1081,21 @@ class SyncMyMoodle:
                     "Opencast",
                     url=vid,
                     additional_info=course_id,
+                )
+
+        # RWTH Video
+        if self.config.get("used_modules", {}).get("url", {}).get("rwthvideo", {}):
+            rwth_video_links = re.findall(
+                "https://video.fsmpi.rwth-aachen.de/.+/[0-9]+", text
+            )
+            for vid in rwth_video_links:
+                link = vid.split('"')[0]
+                logging.info(f"Found RWTH Video: {link}")
+                parent_node.add_child(
+                    module_title or link.split("/")[-1],
+                    id=link.split("/")[-1],
+                    type="RwthVideo",
+                    url=link,
                 )
 
         # https://rwth-aachen.sciebo.de/s/XXX
