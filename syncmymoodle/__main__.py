@@ -1187,7 +1187,9 @@ class SyncMyMoodle:
                                 displayname, None, "Sciebo Folder"
                             )
                             # recursive call to get all files in the folder
-                            get_sciebo_files(new_href, folder_node)
+                            get_sciebo_files(
+                                new_href, folder_node, sharingToken, auth_header
+                            )
                         else:
                             # create a new node for the file
                             parent_node.add_child(
