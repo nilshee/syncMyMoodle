@@ -56,7 +56,7 @@ class Node:
         self.parent = parent
         self.children: List[Node] = []
         self.additional_info = (
-            additional_info  # Currently only used for course_id in opencast
+            additional_info  # Currently only used for course_id in opencast and auth header in sciebo
         )
         self.is_downloaded = (
             is_downloaded  # Can also be used to exclude files from being downloaded
@@ -749,7 +749,7 @@ class SyncMyMoodle:
 
         self._download_all_files(self.root_node)
 
-    def _download_all_files(self, cur_node):
+    def _download_all_files(self, cur_node: Node):
         if len(cur_node.children) == 0:
             if cur_node.url and not cur_node.is_downloaded:
                 logger.info(f"Downloading {cur_node.url} [{cur_node.type}]")
@@ -796,7 +796,7 @@ class SyncMyMoodle:
         basedir = Path(self.config.get("basedir", "./")).expanduser()
         return basedir.joinpath(*(self.sanitize(p) for p in node.get_path()))
 
-    def sanitize(self, path):
+    def sanitize(self, path: str):
         path = urllib.parse.unquote(path)
         path = "".join([s for s in path if s not in self.invalid_chars])
         while path and path[-1] == " ":
@@ -811,7 +811,7 @@ class SyncMyMoodle:
 
         return path
 
-    def download_file(self, node):
+    def download_file(self, node: Node):
         """Download file with progress bar if it isn't already downloaded"""
         downloadpath = self.get_sanitized_node_path(node)
 
@@ -837,6 +837,9 @@ class SyncMyMoodle:
         else:
             resume_size = 0
             header = dict()
+        
+        if node.type.lower() == "sciebo file":
+            header = node.additional_info
 
         with closing(
             self.session.get(node.url, headers=header, stream=True)
@@ -1100,18 +1103,83 @@ class SyncMyMoodle:
 
         # https://rwth-aachen.sciebo.de/s/XXX
         if self.config.get("used_modules", {}).get("url", {}).get("sciebo", {}):
-            sciebo_links = re.findall(
+            sciebo_links = list(set(re.findall(
                 "https://rwth-aachen.sciebo.de/s/[a-zA-Z0-9-]+", text
-            )
-            for vid in sciebo_links:
-                response = self.session.get(vid)
+            )))
+            sciebo_url = "https://rwth-aachen.sciebo.de"
+            webdav_location = '/public.php/webdav/'
+            for link in sciebo_links:
+                logging.info(f"Found Sciebo Link: {link}")
+
+                # get the download page
+                response = self.session.get(link)
+
+                # parse html code
                 soup = bs(response.text, features="html.parser")
-                url = soup.find("input", {"name": "downloadURL"})
-                filename = soup.find("input", {"name": "filename"})
-                if url and filename:
-                    parent_node.add_child(
-                        filename["value"], url["value"], "Sciebo file", url=url["value"]
-                    )
+                
+                # get the requesttoken
+                requestToken = soup.head['data-requesttoken']
+                logger.info(f"RequestToken: {requestToken}")
+
+                # print the property value of the input tag with the name sharingToken
+                sharingToken = soup.find('input', {'name': 'sharingToken'})['value']
+                logger.info(f"SharingToken: {sharingToken}")
+
+                # get baseauthentication secret 
+                baseAuthSecret = base64.b64encode((sharingToken + ':null').encode()).decode()
+                logger.info(f"BaseAuthSecret: {baseAuthSecret}")
+
+                # get auth header
+                auth_header = {
+                    'Authorization': 'Basic ' + baseAuthSecret,
+                    'requesttoken': requestToken,
+                }
+
+                parent_node = parent_node.add_child(f"sciebo-{sharingToken}", None, "Sciebo Folder")
+
+                # recursive function to get all files in the sciebo folder
+                def get_sciebo_files(href: str, parent_node: Node):
+
+                    # request the URL with the PROPFIND method and the header
+                    response = self.session.request('PROPFIND', sciebo_url + href, headers=auth_header)
+
+                    # parse the response
+                    soup = bs(response.text, features="xml")
+
+                    for response in soup.find_all('d:response'):
+                        # get the href of the response
+                        new_href = response.find('d:href').text
+
+                        if new_href == href:
+                            logger.info(f"Skipping {new_href} because it is the current folder")
+                            continue
+
+                        logger.info(f"response: {response.find('d:href').text}")
+                        # get the displayname of the response
+                        displayname = new_href.split('/')[-2] if new_href.endswith('/') else new_href.split('/')[-1]
+                        displayname = f"sciebo-{sharingToken}" if displayname == 'webdav' else displayname
+
+                        # check if the response is a folder
+                        if new_href.endswith('/'):
+                            # create a new node for the folder
+                            folder_node = parent_node.add_child(
+                                displayname,
+                                None,
+                                "Sciebo Folder"
+                            )
+                            # recursive call to get all files in the folder
+                            get_sciebo_files(new_href, folder_node)
+                        else:
+                            # create a new node for the file
+                            parent_node.add_child(
+                                displayname,
+                                None,
+                                "Sciebo File",
+                                url=sciebo_url + new_href,
+                                additional_info=auth_header
+                            )
+
+                get_sciebo_files(webdav_location, parent_node)
 
 
 def main():
