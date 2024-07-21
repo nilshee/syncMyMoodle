@@ -57,7 +57,7 @@ def hotp(key, counter, digits=6, digest="sha1"):
     return str(binary)[-digits:].zfill(digits)
 
 
-def totp(key, time_step=30, digits=6, digest="sha1"):
+def totp(key, time_step=30, digits=8, digest="sha1"):
     return hotp(key, int(time.time() / time_step), digits, digest)
 
 
